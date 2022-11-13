@@ -1,0 +1,206 @@
+-- combining review-checkins table with business and photo table
+SELECT t_ruc.business_id
+	,ch_in
+	,date_tip
+	,business_lat
+	,business_long
+	,business_park
+	,business_price
+	,business_open
+	,business_cat
+	,n_photo
+	,cum_n_tips
+	,cum_max_friends
+	,cum_u_names
+	,cum_max_u_elite
+	,cum_max_us_fans
+	,cum_max_us_tip
+FROM (
+	SELECT t_b.business_id1 AS business_id
+		,business_lat
+		,business_long
+		,business_park
+		,business_price
+		,business_open
+		,business_cat
+		,n_photo
+	FROM (
+		-- table1: for business
+		SELECT business_id AS business_id1
+			,latitude AS business_lat
+			,longitude AS business_long
+			,(
+				CASE
+					WHEN STRPOS((attributes::json) ->> 'BusinessParking', 'True') <> 0
+						THEN 'true'
+					ELSE 'false'
+					END
+				) AS business_park
+			,CAST((attributes::json) ->> 'RestaurantsPriceRange2' AS INTEGER) AS business_price
+			,is_open AS business_open
+			,categories AS business_cat
+		FROM public3.businesstable
+		WHERE STRPOS(categories, 'Restaurants') <> 0 AND city='Akron'
+		) AS t_b
+	LEFT JOIN (
+		-- table2: for photos
+		SELECT business_id AS business_id2
+			,COUNT(*) AS n_photo
+		FROM public3.phototable
+		GROUP BY business_id
+		) AS t_p ON t_b.business_id1 = t_p.business_id2
+	) AS t_bp
+	,(
+	SELECT t_ru.business_id6 AS business_id
+			,(CASE WHEN t_ch.date3 IS NULL THEN 0 ELSE 1 END) AS ch_in
+			,t_ru.date6 AS date_tip
+			,t_ru.cum_n_tips AS cum_n_tips
+			,t_ru.cum_max_friends AS cum_max_friends
+			,t_ru.cum_u_names AS cum_u_names
+			,t_ru.cum_max_u_elite AS cum_max_u_elite
+			,t_ru.cum_max_us_fans AS cum_max_us_fans
+			,t_ru.cum_max_us_tip AS cum_max_us_tip
+		FROM (
+			-- table3: for checkins
+			SELECT t3_1.business_id AS business_id3
+				,date1::DATE AS date3
+			FROM (
+				SELECT public3.checkintable.business_id AS business_id
+					,unnest(string_to_array(DATE, ',')) AS date1
+				FROM public3.checkintable, public3.businesstable
+				WHERE public3.checkintable.business_id = public3.businesstable.business_id AND public3.businesstable.city='Akron'
+				) AS t3_1
+			GROUP BY business_id3
+				,date3
+			) AS t_ch
+		RIGHT JOIN (
+			-- table6.2: a much more elegant, but more complex query
+			SELECT tip_user.business_id51 AS business_id6
+				,tip_user.date5 AS date6
+				,tip_user.n_tips AS n_tips
+				,tip_user.cum_n_tips AS cum_n_tips
+				,(
+					SELECT max(max_us_friends) AS cum_max_friends
+					FROM (
+						SELECT business_id
+							,DATE
+							,max(users.n_friends) AS max_us_friends
+						FROM public3.tipstable
+						LEFT JOIN (
+							SELECT user_id AS user_id
+								,array_length(string_to_array(users.friends, ','), 1) AS n_friends
+							FROM public3.userstable AS users
+							) AS users ON public3.tipstable.user_id = users.user_id
+						GROUP BY business_id
+							,DATE
+						) AS t53
+					WHERE t53.business_id = tip_user.business_id51
+						AND t53.DATE::DATE < tip_user.date5
+					)
+				,(
+					SELECT STRING_AGG(DISTINCT u_names, ',') AS cum_u_names
+					FROM (
+						SELECT business_id
+							,DATE
+							,STRING_AGG(DISTINCT users.u_name, ',') AS u_names
+						FROM public3.tipstable
+						LEFT JOIN (
+							SELECT user_id AS user_id
+								,name AS u_name
+							FROM public3.userstable AS users
+							) AS users ON public3.tipstable.user_id = users.user_id
+						GROUP BY business_id
+							,DATE
+						) AS t53
+					WHERE t53.business_id = tip_user.business_id51
+						AND t53.DATE::DATE < tip_user.date5
+					)
+				,(
+					SELECT max(max_u_elite) AS cum_max_u_elite
+					FROM (
+						SELECT business_id
+							,DATE
+							,max(users.n_elite) AS max_u_elite
+						FROM public3.tipstable
+						LEFT JOIN (
+							SELECT user_id AS user_id
+								,array_length(string_to_array(users.elite, ','), 1) AS n_elite
+							FROM public3.userstable AS users
+							) AS users ON public3.tipstable.user_id = users.user_id
+						GROUP BY business_id
+							,DATE
+						) AS t53
+					WHERE t53.business_id = tip_user.business_id51
+						AND t53.DATE::DATE < tip_user.date5
+					)
+				,(
+					SELECT max(max_us_fans) AS cum_max_us_fans
+					FROM (
+						SELECT business_id
+							,DATE
+							,max(users.u_fans) AS max_us_fans
+						FROM public3.tipstable
+						LEFT JOIN (
+							SELECT user_id AS user_id
+								,fans AS u_fans
+							FROM public3.userstable AS users
+							) AS users ON public3.tipstable.user_id = users.user_id
+						GROUP BY business_id
+							,DATE
+						) AS t53
+					WHERE t53.business_id = tip_user.business_id51
+						AND t53.DATE::DATE < tip_user.date5
+					)
+				,(
+					SELECT max(max_us_tip) AS cum_max_us_tip
+					FROM (
+						SELECT business_id
+							,DATE
+							,max(users.us_tip) AS max_us_tip
+						FROM public3.tipstable
+						LEFT JOIN (
+							SELECT user_id AS user_id
+								,review_count AS us_tip
+							FROM public3.userstable AS users
+							) AS users ON public3.tipstable.user_id = users.user_id
+						GROUP BY business_id
+							,DATE
+						) AS t53
+					WHERE t53.business_id = tip_user.business_id51
+						AND t53.DATE::DATE < tip_user.date5
+					)
+			FROM (
+				SELECT t52.business_id51 AS business_id51
+					,t52.date5 AS date5
+					,t52.n_tips AS n_tips
+					,(
+						SELECT COUNT(t51.TEXT)
+						FROM public3.tipstable AS t51
+						WHERE t51.business_id = t52.business_id51
+							AND t51.DATE::DATE < t52.date5
+						) AS cum_n_tips
+				FROM (
+					SELECT business_id53 AS business_id51, date53 AS date5, n_tips
+					FROM (SELECT tip.business_id AS business_id53, date_trunc('day', generate_series
+							( min(tip.DATE)::timestamp
+							, max(tip.DATE)::timestamp
+							, '1 day'::interval))::date AS date53
+						FROM public3.tipstable AS tip, public3.businesstable AS bus
+						WHERE tip.business_id=bus.business_id AND bus.city='Akron'
+						GROUP BY tip.business_id) AS t53
+						LEFT JOIN
+							(SELECT tip.business_id AS business_id5x
+													,DATE::DATE AS date5x
+													,COUNT(tip.TEXT) AS n_tips
+												FROM public3.tipstable AS tip, public3.businesstable AS bus
+												WHERE tip.business_id=bus.business_id AND bus.city='Akron'
+												GROUP BY tip.business_id
+													,date5x) AS t5x
+							ON business_id5x=business_id53 AND date5x=date53
+					) AS t52
+				) AS tip_user
+			) AS t_ru ON t_ch.date3 = t_ru.date6
+			AND t_ch.business_id3 = t_ru.business_id6
+		WHERE cum_n_tips <> 0
+	) AS t_ruc
+WHERE t_bp.business_id = t_ruc.business_id;
