@@ -1,0 +1,459 @@
+rm(list = ls()) #clear workspace
+library(dplyr)
+library(doParallel)
+library(caret)
+library(smotefamily)
+library(h2o)
+library(ggplot2)
+
+
+source("DailyLevelData_analysis_functions_v0.1.r")
+
+
+### Data transformation and cleaning -------------------------------------------
+
+#Gender
+library(Hmisc)
+
+yelp_data <- read.csv("L_total_C.csv")
+cum_u_names=yelp_data$cum_u_names
+Nobs=length(cum_u_names)
+
+# replacing the cum_u_names with the count of reviewers' genders
+if(0){ # takes some time to run, if you prefer not to wait too long and you have not changed the data, you can use "namelist.RData" to load the results.
+  #install.packages("gender")
+  library(gender)
+  remotes::install_github("ropensci/gender-data-pkg", force = TRUE) 
+  library(genderdata)
+  # best is to do gender extracting in parallel
+  library(doParallel)
+  
+  
+  gendersplit=function(x){
+    a=max.col(gender(unlist(strsplit(x,",")))[,2:3])
+    return(c(male=sum(a==1,na.rm=T),female=sum(a==2,na.rm=T)))
+  }
+  
+  cl=makeCluster(detectCores()/2+2)
+  registerDoParallel(cl)
+  nameslist=NULL
+  for(k in 1:20){
+    whichrun=floor(Nobs/20*(k-1)+1):floor(Nobs/20*k)
+    a=foreach(i=whichrun,.packages=c("gender"),.noexport = c("yelp_data"),.combine=rbind) %dopar%
+      {gendersplit(cum_u_names[i])}
+    rownames(a)=NULL
+    nameslist=rbind(nameslist,a)
+    print(k)
+  }
+  stopImplicitCluster()
+  stopCluster(cl)
+  save(file="nameslist_rev.RData",list="nameslist")
+}else{
+  load("nameslist_rev.RData")  
+}
+
+
+yelp_data=cbind(L_total_C,nameslist)  
+yelp_data$cum_u_names=NULL
+
+yelp_data$DATE <- as.Date(yelp_data$DATE) 
+
+write.csv(yelp_data, file="yelp_data_Lakewood.csv")
+
+yelp_data <- read.csv("yelp_data_Lakewood.csv")
+yelp_data$X=NULL
+
+# make factors out of chr variables
+for(j in 1:ncol(yelp_data)){
+  if(typeof(yelp_data[,j])=="character")
+    yelp_data[,j]=as.factor(yelp_data[,j])
+}
+
+# limit the number of categories to Asian, American, Mexican and Others
+
+cat_s=as.character(yelp_data$business_cat)
+new_cat_s=c("Others","Asian", "American", "Mexican")
+
+changed=0
+for(k in new_cat_s[-1]){
+  cat_s[grepl(k,cat_s)]=k
+  changed=changed+grepl(k,cat_s)
+}
+cat_s[changed==0]="Others"
+yelp_data$business_cat=as.factor(cat_s)
+
+# n_photos==NA, cum_max_u_elite==NA  are actually zeros, let's replace them with 0 before imputing.
+yelp_data$n_photo<-as.numeric(yelp_data$n_photo)
+yelp_data$n_photo[is.na(yelp_data$n_photo)]=0
+yelp_data$cum_max_u_elite<-as.numeric(yelp_data$cum_max_u_elite)
+yelp_data$cum_max_u_elite[is.na(yelp_data$cum_max_u_elite)]=0
+
+# some descriptives of the data
+summary(yelp_data)
+describe(yelp_data)
+
+
+# add weekends and quarters
+temp=weekdays(yelp_data$date,abbreviate = T)
+yelp_data$WE=temp=="Sat"|temp=="Sun"
+yelp_data$WE<- ifelse(yelp_data$WE=="TRUE",1,0)
+yelp_data$Quarter=as.factor(quarters(yelp_data$date))
+yelp_data$Month=as.factor(months(yelp_data$date))
+
+#save(file="yelp_data_weather.RData",list=c("yelp_data_weather"))
+write.csv(yelp_data,file="yelp_data_all.csv")
+
+
+yelp_data$date = as.Date(yelp_data$date)
+yelp_data$ch_in_string[yelp_data$ch_in>=1]="ch_in"
+yelp_data$ch_in_string[yelp_data$ch_in==0]="Noch_in"
+yelp_data$ch_in_string <- as.factor(yelp_data$ch_in_string)
+yelp_data$ch_in_string <- relevel(yelp_data$ch_in_string,ref="ch_in") # since the performance evaluations are mainly made
+# to check for the minority class - in our case Noch_in
+
+yelp_data$business_park=as.factor(yelp_data$business_park)
+yelp_data$business_open=as.factor(yelp_data$business_open)
+yelp_data$business_cat=as.factor(yelp_data$business_cat)
+yelp_data$business_wifi=as.factor(yelp_data$business_wifi)
+yelp_data$business_open=as.factor(yelp_data$business_open)
+yelp_data$WE=as.factor(yelp_data$WE)
+yelp_data$Quarter=as.factor(yelp_data$Quarter)
+yelp_data$Month=as.factor(yelp_data$Month)
+
+yelp_data$business_wifi<- ifelse(yelp_data$business_wifi=="true",1,0)
+yelp_data$business_card<- ifelse(yelp_data$business_card=="true",1,0)
+yelp_data$business_park<- ifelse(yelp_data$business_park=="true",1,0)
+yelp_data$business_open<- ifelse(yelp_data$business_open=="True",1,0)
+
+
+#missings
+yelp_data$n_photo[is.na(yelp_data$n_photo)] <- 0
+yelp_data$cum_max_u_elite[is.na(yelp_data$cum_max_u_elite)] <- round(mean(yelp_data$cum_max_u_elite, na.rm = TRUE))
+
+summary(yelp_data)
+#creating dummies for restaurant category
+yelp_data<-cbind(yelp_data,cat_s)
+#install.packages("psych")
+library(psych)
+
+cat_dummies <- dummy.code(yelp_data$cat_s)
+cat_dummies <-apply(cat_dummies,FUN=as.integer,MARGIN=2)
+yelp_data <- data.frame(yelp_data,cat_dummies) 
+
+
+### Descriptive statistics------------------------------------------------------
+
+# business data summary
+library(Hmisc)
+library(corrplot)
+#install.packages("stargazer")
+library(stargazer)
+names(yelp_data)
+descriptive <- subset(yelp_data,select=c("ch_in", "business_wifi","business_card","business_park","business_price","business_open", "American", "Mexican", "Others"))
+cols <- sapply(descriptive, is.factor)
+descriptive[,cols] <- lapply(descriptive[,cols], as.logical)
+descriptive[,cols] <- lapply(descriptive[,cols], as.numeric)
+labs<-c("Check-in","WiFi", "Credit card", "Parking","Price level","Functioning",  "American", "Mexican", "Others")
+stargazer(descriptive, type="html",out = "business_summary.htm", covariate.labels = labs, title = "Business attributes")
+
+# User data summary 
+yelp_data$cum_max_u_elite<-as.integer(yelp_data$cum_max_u_elite)
+user_data<- subset(yelp_data,select=c("ch_in","cum_n_tips","cum_max_friends", "cum_max_u_elite",  "cum_max_us_fans", 
+                                      "cum_max_us_tip","male","female"))
+stargazer(user_data, type="html",out = "user_summary.htm", title = "User data")
+
+# User content summary
+yelp_data$n_photo<-as.integer(yelp_data$n_photo)
+review_data<-subset(yelp_data,select = c("ch_in","n_photo", "business_stars"))
+stargazer(review_data, type="html",out = "review_summary.htm", title = "Review data")
+
+# External weather data summary
+names(yelp_data)
+ext_data<- subset(yelp_data,select=c("ch_in","WE","PRCP","TMAX","TMIN","AWND",
+                                     "PGTM","WDF2","WDF5","WSF2","WSF5"))
+stargazer(ext_data, type="html",out = "ext_summary.htm", title = "User data")
+
+
+write.csv(yelp_data,file = "yelp_data_transformed_full.csv") #data with cat and gender dummies before splitting
+
+#Density plots
+#install.packages("ggplot2")
+library(ggplot2)
+yelp_agg <- aggregate(ch_in ~ business_stars, data=yelp_data_alldata, FUN="mean")
+qplot(x=yelp_agg$business_stars,y=yelp_agg$ch_in,main="Check-in Likelihood; split by Stars",
+      xlab="Stars", ylab="Check-in", color=I("blue"))  + theme_gray(base_size = 14)
+
+yelp_agg <- aggregate(ch_in ~ bus_review_count, data=yelp_data_alldata, FUN="mean")
+qplot(x=yelp_agg$bus_review_count,y=yelp_agg$ch_in,main="Check-in Likelihood; split by number of Reviews",
+      xlab="Reviews", ylab="Check-in", color=I("blue"))  + theme_gray(base_size = 14)
+
+### Data splitting--------------------------------------------------------------
+
+install.packages("caTools")
+yelp_data <- read.csv("To_Model.csv")
+library(caTools)
+split = sample.split(yelp_data$ch_in, SplitRatio = 0.8)
+train = subset(yelp_data, split==TRUE)
+valid = subset(yelp_data, split==FALSE)
+
+table(train$ch_in)
+table(valid$ch_in)
+
+yelp_data_alldata<-yelp_data
+yelp_data<-train
+
+#save datasets
+save(object = yelp_data_alldata, file = "yelp_data_alldata.Rdata")
+save(object = yelp_data, file = "yelp_data_train.Rdata")
+save(object = valid, file = "yelp_data_valid.Rdata")
+
+
+#correlation
+names(select_if(yelp_data_alldata, is.numeric))
+correlations <- cor(yelp_data_alldata[, c("ch_in","business_stars","bus_review_count","business_wifi",   
+                                          "business_park","business_price","business_open","n_photo","cum_n_tips",      
+                                          "cum_max_friends",  "cum_max_u_elite","cum_max_us_fans" , "cum_max_us_tip" ,"PRCP","TMAX","TMIN","AWND",
+                                          "PGTM","WDF2","WDF5","WSF2","WSF5" , "male"  , "female" , "American" ,  "Mexican","Others")], use = "pairwise.complete.obs")
+
+library(ggcorrplot)
+ggcorrplot(correlations, hc.order=TRUE, type="full", outline.col="white")
+
+
+### Models----------------------------------------------------------------------
+
+yelp_data<-load("yelp_data_train.Rdata")
+valid<-load("yelp_data_valid.Rdata")
+
+names(yelp_data)
+all_formula <- ch_in ~ business_stars + bus_review_count + business_wifi + 
+  business_park + business_price + business_open + n_photo + cum_n_tips + cum_max_friends +
+  cum_max_u_elite + cum_max_us_fans + cum_max_us_tip + PRCP + TMAX + TMIN + AWND + PGTM + WDF2 +            
+  WDF5 + WSF2 + WSF5 + male + female + date + WE + Quarter + Month + American + Others + Mexican         
+
+
+######### LOGIT
+model_lr <- glm(all_formula, data = yelp_data, family = "binomial") 
+summary(model_lr)
+save(object = model_lr, file = "model_lr.Rdata")
+
+
+############ Naive Bayes
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+ptm <- proc.time()
+yelp_data$ch_in<-as.factor(yelp_data$ch_in)
+model_nb <- train(all_formula, data = yelp_data, method="naive_bayes")
+
+library(e1071)
+library(caTools)
+library(caret)
+
+yelp_data$ch_in<-train$ch_in
+model_nb <- naiveBayes(all_formula, data = yelp_data)
+
+############ KNN k-nearest neighbors algorithm
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+ptm <- proc.time()
+model_knn <- train(some_formula, data = yelp_data, method="knn")
+summary(model_knn)
+
+
+############ SVM
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+ptm <- proc.time()
+# fast trainer
+model_svm <- train(all_formula, data = yelp_data, method="svmLinear", cachesize=12000, tolerance=.01,
+                   trControl = trainControl(classProbs =  TRUE))
+summary(model_svm)
+
+
+########## Neural network
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+library(NeuralNetTools) # required for plotting
+# fast trainer using parallel computations
+ptm <- proc.time()
+mlp_grid = expand.grid(layer1 = 6,
+                       layer2 = 5,
+                       layer3 = 5)
+model_ann <- train(all_formula, data=yelp_data, method='mlpML',tuneGrid=mlp_grid) 
+
+
+########## DECISION TREE
+# fast model using parallel computation
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+ptm <- proc.time()
+model_dt <- train(all_formula, data=yelp_data, method='ctree2') 
+
+
+############ Bagging
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+ptm <- proc.time()
+# fast training using parallel computation
+model_bagging  <- train(all_formula, data=yelp_data, method="treebag",importance=T)
+
+
+############ Boosting
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+ptm <- proc.time()
+# Create a model using boosting ensemble algorithms
+# fast trainer using parallel computation
+model_boosting  <- train(all_formula, data=yelp_data, method = 'blackboost')
+model_boosting<-x.modelBoosting
+
+
+############ RANDOM FOREST
+install.packages("randomForest")
+library(randomForest)
+set.seed(12345)
+model_rf<- randomForest(all_formula, 
+                        data=yelp_data, 
+                        ntree=100,
+                        mtry=3,    
+                        nodesize=50,  
+                        maxnodes=10,  
+                        replace=TRUE, 
+                        importance=TRUE,
+                        sampsize=6080) 
+
+save(object = model_ann, file = "model_ANN.Rdata")
+save(object = model_bagging, file = "model_Bagging.Rdata")
+save(object = model_boosting, file = "model_Boosting.Rdata")
+save(object = model_dt, file = "model_DT.Rdata")
+save(object = model_knn, file = "model_KNN.Rdata")
+save(object = model_lr, file = "model_LR.Rdata")
+save(object = model_svm, file = "model_SVM.Rdata")
+save(object = model_rf, file = "model_RF.Rdata")
+save(object = model_nb, file = "model_NB.Rdata")
+
+
+###Generate preditions----------------------------------------------------------
+
+yelp_data<-load("yelp_data_train.Rdata")
+valid<-load("yelp_data_valid.Rdata")
+
+model_ann<-load("model_ANN.Rdata")
+model_bagging<-load("model_Bagging.Rdata")
+model_boosting<-load("model_Boosting.Rdata")
+model_dt<-load("model_DT.Rdata")
+model_knn<-load("model_KNN.Rdata")
+model_lr<-load("model_LR.Rdata")
+model_svm<-load("model_SVM.Rdata")
+model_rf<-load("model_RF.Rdata")
+model_nb<-load("model_NB.Rdata")
+
+valid$pred_ann <- predict(model_ann,newdata=valid, predict.all=FALSE)
+valid$pred_bagging <- predict(model_bagging,newdata=valid, predict.all=FALSE)
+valid$pred_boosting <- predict(model_boosting,newdata=valid, predict.all=FALSE)
+valid$pred_dt <- predict(model_dt,newdata=valid, predict.all=FALSE)
+valid$pred_knn <- predict(model_knn,newdata=valid, predict.all=FALSE)
+valid$pred_lr <- predict(model_lr,newdata=valid, type="response", predict.all=FALSE)
+valid$pred_rf <- predict(model_rf,newdata=valid, type="response", predict.all=FALSE)
+valid$pred_svm <- predict(model_svm,newdata=valid, predict.all=FALSE)
+valid$pred_nb <- predict(model_nb,newdata=valid, predict.all=FALSE)
+
+###Compare models via confusion matrix------------------------------------------
+install.packages("lattice")
+library(caret)
+valid$ann_01 <- ifelse(valid$pred_ann >.1,1,0)
+valid$bagging_01 <- ifelse(valid$pred_bagging >.1,1,0)
+valid$boosting_01 <- ifelse(valid$pred_boosting >.1,1,0)
+valid$dt_01 <- ifelse(valid$pred_dt >.1,1,0)
+valid$knn_01 <- ifelse(valid$pred_knn >.1,1,0)
+valid$lr_01 <- ifelse(valid$pred_lr >.1,1,0)
+valid$rf_01 <- ifelse(valid$pred_rf >.1,1,0)
+valid$svm_01 <- ifelse(valid$pred_svm >.1,1,0)
+
+conf_matrix_ann<-confusionMatrix(as.factor(valid$ann_01), as.factor(valid$ch_in),
+                                 positive="1", 
+                                 dnn = c("Artificial neural network", "True Data"))
+conf_matrix_bagging<-confusionMatrix(as.factor(valid$bagging_01), as.factor(valid$ch_in),
+                                     positive="1",
+                                     dnn = c("Bootstrap aggregating", "True Data"))
+conf_matrix_boosting<-confusionMatrix(as.factor(valid$boosting_01),as.factor(valid$ch_in),
+                                      positive="1", 
+                                      dnn = c("Boosting","True Data"))
+conf_matrix_dt<-confusionMatrix(as.factor(valid$dt_01),as.factor(valid$ch_in),
+                                positive="1", 
+                                dnn = c("Decision tree","True Data"))
+conf_matrix_knn<-confusionMatrix(as.factor(valid$knn_01), as.factor(valid$ch_in),
+                                 positive="1", 
+                                 dnn = c("K-Nearest Neighbors", "True Data"))
+conf_matrix_lr<-confusionMatrix(as.factor(valid$lr_01), as.factor(valid$ch_in),
+                                positive="1",
+                                dnn = c("Logistic Regression", "True Data"))
+conf_matrix_nb<-confusionMatrix(as.factor(valid$pred_nb),as.factor(valid$ch_in),
+                                positive="1", 
+                                dnn = c("Naive Bayes","True Data"))
+conf_matrix_rf<-confusionMatrix(as.factor(valid$rf_01),as.factor(valid$ch_in),
+                                positive="1", 
+                                dnn = c("Random Forest","True Data"))
+conf_matrix_svm<-confusionMatrix(as.factor(valid$svm_01),as.factor(valid$ch_in),
+                                 positive="1", 
+                                 dnn = c("Support vector machine","True Data"))
+
+conf_matrix_ann
+conf_matrix_bagging
+conf_matrix_boosting
+conf_matrix_dt
+conf_matrix_knn
+conf_matrix_lr
+conf_matrix_nb
+conf_matrix_rf
+conf_matrix_svm
+
+
+##Compare models via ROC
+library(pROC)
+valid$pred_nb_num<-ifelse(valid$pred_nb=="1",1,0)
+roc_ann <- roc(valid$ch_in,valid$pred_ann, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+roc_bagging <- roc(valid$ch_in,valid$pred_bagging, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+roc_boosting <- roc(valid$ch_in,valid$pred_boosting, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+roc_dt <- roc(valid$ch_in,valid$pred_dt, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+roc_knn <- roc(valid$ch_in,valid$pred_knn, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+roc_lr <- roc(valid$ch_in,valid$pred_lr, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+roc_nb <- roc(valid$ch_in,valid$pred_nb_num, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+roc_rf <- roc(valid$ch_in,valid$pred_rf, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+roc_svm <- roc(valid$ch_in,valid$pred_svm, percent=TRUE, plot=TRUE, print.auc=TRUE,grid=TRUE)
+
+plot(roc_ann, main = "Artificial neural network",col="red",print.auc=TRUE)
+plot(roc_bagging, main = "Bootstrap aggregating",col="red",print.auc=TRUE)
+plot(roc_boosting, main = "Boosting",col="red",print.auc=TRUE)
+plot(roc_dt, main = "Decision tree",col="red",print.auc=TRUE)
+plot(roc_knn, main = "K-Nearest Neighbors",col="red",print.auc=TRUE)
+plot(roc_lr, main = "Logistic Regression",col="red",print.auc=TRUE)
+plot(roc_nb, main = "Naive Bayes",col="red",print.auc=TRUE)
+plot(roc_rf, main = "Random Forest",col="red",print.auc=TRUE)
+plot(roc_svm, main = "Support vector machine",col="red",print.auc=TRUE)
+
+
+#Variable Importance
+varImpPlot(model_rf,
+           sort = T,
+           main = "Variable Importance")
+
+# Get variable importance from the model fit
+ImpData <- as.data.frame(importance(model_rf))
+ImpData$Var.Names <- row.names(ImpData)
+
+library(ggplot)
+ggplot(ImpData, aes(x=Var.Names, y=`%IncMSE`)) +
+  geom_segment( aes(x=Var.Names, xend=Var.Names, y=0, yend=`%IncMSE`), color="skyblue") +
+  geom_point(aes(size = IncNodePurity), color="blue", alpha=0.6) +
+  theme_light() +
+  coord_flip() +
+  theme(
+    legend.position="bottom",
+    panel.grid.major.y = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.y = element_blank())
+
